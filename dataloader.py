@@ -73,7 +73,7 @@ def extract_labels(filename, one_hot=False):
 
 class Dataloader(object):
 
-  def __init__(self, data, sizes,norm):
+  def __init__(self, data, sizes,norm, ssl_lbls):
     """Construct a DataSet.
     """
     self.data = {}
@@ -83,9 +83,11 @@ class Dataloader(object):
 
     self.logging_pol=None
 
-    ds = ['train','val','test']
+    ds = ['train_ulbl','train','val','test']
     self.mean = None
     self.std = None
+
+    self.bsz_lbl = ssl_lbls
 
     self.bsz = 32
     self.cuda = False
@@ -111,7 +113,7 @@ class Dataloader(object):
   def unnorm(self,X):
       return (X*self.std)+self.mean
 
-  def next_batch(self, batch_size = None,dataset='train'):
+  def next_batch(self, dataset,batch_size = None):
     """Return the next `batch_size` examples from this data set."""
     if not batch_size:
         batch_size = self.bsz
@@ -133,9 +135,21 @@ class Dataloader(object):
     end = self._index_in_epoch
     return self.data[dataset][0][start:end], self.data[dataset][1][start:end]
 
-  def sample(self,*args, **kwargs):
+  def sample(self, batch_size = None,dataset='ssl'):
       """Packs the data from self.next_batch() into Pytorch tensors"""
-      X, y = self.next_batch(*args, **kwargs)
+      if not batch_size:
+          batch_size = self.bsz
+      if dataset == 'ssl':
+          X_lbl, y_lbl = self.next_batch(dataset='train',batch_size=self.bsz_lbl)
+          X_ulbl, y_ulbl = self.next_batch(dataset='train_ulbl', batch_size=self.bsz-self.bsz_lbl)
+
+          X = np.concatenate((X_lbl,X_ulbl))
+          y = np.concatenate((y_lbl, y_ulbl))
+      elif dataset in ['val', 'test']:
+          X, y = self.next_batch(dataset=dataset,batch_size=batch_size)
+      else:
+          assert False, 'Expected a dataset of name (ssl) or (val) or (test)'
+      assert X.shape[0] == self.bsz
       data = torch.FloatTensor(np.transpose(X,[0,3,1,2]))
       targets = torch.LongTensor(y.astype(np.int64))
       if self.cuda:
@@ -146,7 +160,8 @@ class Dataloader(object):
 
 
 
-def read_data_sets(train_dir, one_hot=False,norm=False):
+def read_data_sets(train_dir, one_hot=False,norm=False, ssl_lbls = 10, ssl_ratio = 0.1):
+  """For the train set, only (ssl_ratio) labels are stored. For self.sample(), every first (ssl_lbls) are labelled"""
   TRAIN_IMAGES = 'train-images-idx3-ubyte.gz'
   TRAIN_LABELS = 'train-labels-idx1-ubyte.gz'
   TEST_IMAGES = 't10k-images-idx3-ubyte.gz'
@@ -171,11 +186,21 @@ def read_data_sets(train_dir, one_hot=False,norm=False):
   train_images = train_images[VALIDATION_SIZE:]
   train_labels = train_labels[VALIDATION_SIZE:]
 
-
-  data = {  'train'     :(train_images, train_labels),
+  #Make SSL
+  N = train_images.shape[0]
+  num_labelled = int(ssl_ratio*N)
+  num_unlabelled = N - num_labelled
+  print('SSL: We have %i train samples, of which %i labelled and %i unlabelled'%(N,num_labelled,num_unlabelled))
+  train_images_lbl = train_images[:num_labelled]
+  train_labels_lbl = train_labels[:num_labelled]
+  train_images_ulbl = train_images[num_labelled:]
+  train_labels_ulbl = np.zeros((num_unlabelled,))
+  data = {  'train'     :(train_images_lbl, train_labels_lbl),
+            'train_ulbl':(train_images_ulbl, train_labels_ulbl),
             'val'       :(validation_images, validation_labels),
             'test'      :(test_images, test_labels)}
-  sizes = {'train'      :train_images.shape[0],
+  sizes = {'train'      :train_images_lbl.shape[0],
+           'train_ulbl' :train_images_ulbl.shape[0],
             'val'       :validation_images.shape[0],
             'test'      :test_images.shape[0]}
-  return Dataloader(data, sizes, norm)
+  return Dataloader(data, sizes, norm, ssl_lbls)
